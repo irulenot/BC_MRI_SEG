@@ -17,7 +17,7 @@
 
 ### Inference Example
 
-To test inference you can run the `test.py` file.
+To test inference you can run the `test.py` file. If it is running properly you will get a RIDER DSC ~0.13 and a DUKE F1 ~0.27.
 
 ### Training Example
 
