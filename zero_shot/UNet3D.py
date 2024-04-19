@@ -122,7 +122,7 @@ def main():
         num_res_units=2,
         norm=Norm.BATCH,
     ).to(device)
-    checkpoint_path = 'weights/UNet_CombinedP.pth'
+    checkpoint_path = 'weights/UNet3D.pth'
     checkpoint = torch.load(checkpoint_path)
     model.load_state_dict(checkpoint)
 

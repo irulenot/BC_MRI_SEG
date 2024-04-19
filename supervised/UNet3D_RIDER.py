@@ -113,7 +113,7 @@ def main():
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
 
     max_epochs = 300
-    device = torch.device("cuda:2")
+    device = torch.device("cuda:0")
     model = UNet(
         spatial_dims=3,
         in_channels=4,

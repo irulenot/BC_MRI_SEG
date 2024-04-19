@@ -8,10 +8,15 @@ import nibabel as nib
 import pickle
 
 def main():
-    data_dir = 'E:/full_data/ISPY1/NIfTI-Files/'
+    data_dir = 'full_data/ISPY1/ISPY1-Tumor-SEG-Radiomics/NIfTI-Files/'
+    output_path = 'data/ISPY1/'
+    os.makedirs(output_path, exist_ok=True)
+    os.makedirs(os.path.join(output_path, 'masks'), exist_ok=True)
+    os.makedirs(os.path.join(output_path, 'images'), exist_ok=True)
+
     patient_id = 0
     for i in tqdm(range(0, 240)):
-        file_path1 = f'{data_dir}masks_stv_manual/ISPY1_1{i:03d}.nii'
+        file_path1 = f'{data_dir}masks_stv_manual/ISPY1_1{i:03d}.nii.gz'
         if not os.path.exists(file_path1):
             continue
 
@@ -36,7 +41,6 @@ def main():
         if masks.shape[2] != images.shape[2]:
             continue
 
-        output_path = 'E:/breast_cancer_mri/ISPY1/'
         masks_save_path = os.path.join(output_path, f'masks/ispy1_{patient_id}.npy')
         images_save_path = os.path.join(output_path, f'images/ispy1_{patient_id}.npy')
         np.save(masks_save_path, masks)

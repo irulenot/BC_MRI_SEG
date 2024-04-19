@@ -39,8 +39,8 @@ import numpy as np
 import wandb
 import sys
 sys.path.append(sys.path[0][:-9])
-from sama import sam_model_registry
-import sama.cfg as cfg
+from Med_SA import sam_model_registry
+import Med_SA.cfg as cfg
 wandb.init(project="ichi2024", name="SAM")
 
 

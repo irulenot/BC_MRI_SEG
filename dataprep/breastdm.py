@@ -1,11 +1,27 @@
+# Dataset: https://github.com/smallboy-code/Breast-cancer-dataset
+
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from os import walk
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import json
+import matplotlib.patches as patches
+import pickle
+import torch.nn.functional as F
+import torch
 
 curr_idx = 0
-data_path = 'data/BreastDM/seg3D/'
+data_path = 'full_data/BreastDM/seg3D/'
+output_path = 'data/BreastDM/'
+os.makedirs(output_path, exist_ok=True)
+os.makedirs(os.path.join(output_path, 'masks'), exist_ok=True)
+os.makedirs(os.path.join(output_path, 'images'), exist_ok=True)
+
 for dirpath, dirnames, filenames in tqdm(walk(data_path)):
     if dirnames == [] and filenames != [] and 'labels' in dirpath:
         images_path = dirpath.replace('labels', 'images')
@@ -26,6 +42,6 @@ for dirpath, dirnames, filenames in tqdm(walk(data_path)):
             seqs.append(imgs)
         seqs, labels = np.array(seqs), np.array(labels)
         seqs, labels = seqs.transpose(1, 0, 2, 3), labels.transpose(1, 0, 2, 3)
-        np.save(f'data/BreastDM/images/dm_{curr_idx}.npy', seqs)
-        np.save(f'data/BreastDM/masks/dm_{curr_idx}.npy', labels)
+        np.save(output_path + f'images/dm_{curr_idx}.npy', seqs)
+        np.save(output_path + f'masks/dm_{curr_idx}.npy', labels)
         curr_idx += 1

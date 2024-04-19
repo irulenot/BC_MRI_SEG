@@ -146,7 +146,7 @@ def main():
     individual_names = ['ISPY1', 'BreastDM']
 
     max_epochs = 300
-    device = torch.device("cuda:2")
+    device = torch.device("cuda:0")
     model = UNet(
         spatial_dims=3,
         in_channels=3,
@@ -156,9 +156,6 @@ def main():
         num_res_units=2,
         norm=Norm.BATCH,
     ).to(device)
-    # checkpoint_path = 'weights/UNet3D.pth'
-    # checkpoint = torch.load(checkpoint_path)
-    # model.load_state_dict(checkpoint)
 
     def count_learnable_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -224,7 +221,7 @@ def main():
                 best_metric3 = metric3
                 torch.save(
                     model.state_dict(),
-                    os.path.join(save_dir, "UNet3D.pth"),
+                    os.path.join(save_dir, "UNet3D_test.pth"),
                 )
                 print(f"saved new best metric model at epoch: {best_metric_epoch}")
                 print(
