@@ -4,7 +4,7 @@
 2. Rename the top-level directories of each downloaded dataset to ISPY1, RIDER, BreastDM, and DUKE respectively. Make sure to download DUKE's mapping and boxes files and to place them in the now DUKE directory.
 3. Create a new directory named `data`.
 4. Run all of the python files for each respective dataset under the `dataprep` directory.
-5. Optional: Now all the datasets are ready. If you want to replicate our experiments or run the examples run the `standardize_data.py` file beforehand.
+5. Optional: Now all the datasets are ready. If you want to replicate our experiments or run the examples run the `standardize_data.py` file beforehand and download our [weights](https://drive.google.com/file/d/1fcUzheXMvmmrV3CKt0woC_9aHi_ltrwA/view?usp=sharing).
 
 ### Dataset Links
 
