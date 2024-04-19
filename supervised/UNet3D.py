@@ -37,9 +37,7 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 import wandb
-from sama import sam_model_registry
-import sama.cfg as cfg
-wandb.init(project="ichi2024", name="SAM")
+wandb.init(project="ichi2024", name="UNet3D")
 
 
 standard_shape = (256, 256, 128)
@@ -138,29 +136,26 @@ def main():
     test_ds = DatasetMRI(all_test_image_paths, all_test_mask_paths, test_transform, train=False)
     test_ds0 = DatasetMRI(individual_test_image_paths[0], individual_test_mask_paths[0], test_transform, train=False)
     test_ds1 = DatasetMRI(individual_test_image_paths[1], individual_test_mask_paths[1], test_transform, train=False)
+    # test_ds2 = DatasetMRI(individual_test_image_paths[2], individual_test_mask_paths[2], test_transform, train=False)
     train_loader = DataLoader(train_ds, batch_size=1, shuffle=True)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     test_loader0 = DataLoader(test_ds0, batch_size=1, shuffle=False)
     test_loader1 = DataLoader(test_ds1, batch_size=1, shuffle=False) 
+    # test_loader2 = DataLoader(test_ds2, batch_size=1, shuffle=False) 
     individual_test_loaders = [test_loader0, test_loader1]
     individual_names = ['ISPY1', 'BreastDM']
 
     max_epochs = 300
-    device = torch.device("cuda:3")
-    args = cfg.parse_args()
-    args.thd = True
-    args.chunk = 32
-    args.sam_ckpt = 'weights/vit_b.pth'
-    model = sam_model_registry['vit_b'](args, checkpoint=args.sam_ckpt).to(device)
-    checkpoint_path = 'weights/SAM.pth'
-    checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint)
-
-
-    for n, value in model.image_encoder.named_parameters():
-        if "Adapter" not in n:
-            value.requires_grad = False
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
+    device = torch.device("cuda:2")
+    model = UNet(
+        spatial_dims=3,
+        in_channels=3,
+        out_channels=3,
+        channels=(16, 32, 64, 128, 256),
+        strides=(2, 2, 2, 2),
+        num_res_units=2,
+        norm=Norm.BATCH,
+    ).to(device)
 
     def count_learnable_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -187,38 +182,18 @@ def main():
     best_metric, best_metric2, best_metric3 = -1, -1, -1
     best_metric_epoch = -1
     total_start = time.time()
-    with torch.no_grad():
-        se, de = model.prompt_encoder(
-            points=None,
-            boxes=None,
-            masks=None,
-        )
-    batch_size = 32
     for epoch in tqdm(range(max_epochs)):
         model.train()
         epoch_loss, step = 0, 0
         for image, label in train_loader:
-            image = image.squeeze().permute(-1, 0, 1, 2)
             step += 1
             optimizer.zero_grad()
-            for i in range(0, image.shape[0], batch_size):
-                images = image[i:i+batch_size]
-                labels = label[..., i:i+batch_size]
-                imge = model.image_encoder(images.to(device))
-                logits, _ = model.mask_decoder(
-                    image_embeddings=imge,
-                    image_pe=model.prompt_encoder.get_dense_pe(),
-                    sparse_prompt_embeddings=se,
-                    dense_prompt_embeddings=de, 
-                    multimask_output=True,
-                )
-                logits = F.interpolate(logits, size=(list(label.shape)[2:-1]), mode='bicubic', align_corners=False)
-                logits = logits.permute(1, 2, 3, 0).unsqueeze(0)
-                loss = loss_function(logits, labels.to(device))
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                epoch_loss += loss.item()/4
+            output = model(image.to(device))  # (B, C, H, W, D)
+            loss = loss_function(output, label.to(device))
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            epoch_loss += loss.item()
         lr_scheduler.step()
         epoch_loss /= step
         print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
@@ -227,24 +202,8 @@ def main():
         model.eval()
         with torch.no_grad():
             for image, label in test_loader:
-                image = image.squeeze().permute(-1, 0, 1, 2).as_tensor()
-                step += 1
-                optimizer.zero_grad()
-                output = []
-                for i in range(0, image.shape[0], batch_size):
-                    images = image[i:i+batch_size]
-                    imge = model.image_encoder(images.to(device))
-                    logits, _ = model.mask_decoder(
-                        image_embeddings=imge,
-                        image_pe=model.prompt_encoder.get_dense_pe(),
-                        sparse_prompt_embeddings=se,
-                        dense_prompt_embeddings=de, 
-                        multimask_output=True,
-                    )
-                    output.append(logits.cpu())
-                output = torch.concatenate(output)
-                output = output.permute(1, 2, 3, 0).unsqueeze(0)
-                output = F.interpolate(output, size=list(label.shape)[2:], mode='trilinear', align_corners=False).cpu()
+                output = model(image.to(device))
+                output = F.interpolate(output, size=(list(label.shape)[2:]), mode='trilinear', align_corners=False).cpu()
                 output = post_trans(output)
                 dice_metric(y_pred=output, y=label)
                 iou_metric(y_pred=output, y=label)
@@ -262,7 +221,7 @@ def main():
                 best_metric3 = metric3
                 torch.save(
                     model.state_dict(),
-                    os.path.join(save_dir, "SAM.pth"),
+                    os.path.join(save_dir, "UNet3D.pth"),
                 )
                 print(f"saved new best metric model at epoch: {best_metric_epoch}")
                 print(
@@ -281,24 +240,8 @@ def main():
 
                     dataset = individual_names[i]
                     for image, label in individual_test_loader:
-                        image = image.squeeze().permute(-1, 0, 1, 2).as_tensor()
-                        step += 1
-                        optimizer.zero_grad()
-                        output = []
-                        for i in range(0, image.shape[0], batch_size):
-                            images = image[i:i+batch_size]
-                            imge = model.image_encoder(images.to(device))
-                            logits, _ = model.mask_decoder(
-                                image_embeddings=imge,
-                                image_pe=model.prompt_encoder.get_dense_pe(),
-                                sparse_prompt_embeddings=se,
-                                dense_prompt_embeddings=de, 
-                                multimask_output=True,
-                            )
-                            output.append(logits.cpu())
-                        output = torch.concatenate(output)
-                        output = output.permute(1, 2, 3, 0).unsqueeze(0)
-                        output = F.interpolate(output, size=list(label.shape)[2:], mode='trilinear', align_corners=False).cpu()
+                        output = model(image.to(device))
+                        output = F.interpolate(output, size=(list(label.shape)[2:]), mode='trilinear', align_corners=False).cpu()
                         output = post_trans(output)
                         dice_metric(y_pred=output, y=label)
                         iou_metric(y_pred=output, y=label)

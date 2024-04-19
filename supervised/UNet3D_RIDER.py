@@ -1,33 +1,3 @@
-from monai.utils import first, set_determinism
-from monai.transforms import (
-    AsDiscrete,
-    AsDiscreted,
-    EnsureChannelFirstd,
-    Compose,
-    CropForegroundd,
-    LoadImaged,
-    Orientationd,
-    RandCropByPosNegLabeld,
-    SaveImaged,
-    ScaleIntensityRanged,
-    Spacingd,
-    Invertd,
-)
-from monai.handlers.utils import from_engine
-from monai.networks.nets import UNet
-from monai.networks.layers import Norm
-from monai.metrics import DiceMetric
-from monai.losses import DiceLoss
-from monai.inferers import sliding_window_inference
-from monai.data import CacheDataset, DataLoader, Dataset, decollate_batch
-from monai.config import print_config
-from monai.apps import download_and_extract
-import torch
-import matplotlib.pyplot as plt
-import tempfile
-import shutil
-import os
-import glob
 import os
 import time
 import matplotlib.pyplot as plt
@@ -64,78 +34,89 @@ from monai.transforms import (
 import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 import torch
+from torch.utils.data import Dataset
 import numpy as np
 import wandb
-wandb.init(project="ichi2024", name="UNet_Spleen")
+wandb.init(project="ichi2024", name="UNet3D_RIDER")
 
 
 standard_shape = (256, 256, 128)
+class DatasetMRI(Dataset):
+    def __init__(self, data_paths, label_paths, transforms=None, train=True):
+        self.data_paths = data_paths
+        self.label_paths = label_paths
+        self.transforms = transforms
+        self.train = train
+
+    def __len__(self):
+        return len(self.data_paths)
+
+    def __getitem__(self, idx):
+        image = np.load(self.data_paths[idx]).transpose(1, 2, 3, 0)
+        mask = np.load(self.label_paths[idx]).transpose(1, 2, 3, 0)
+        image = torch.tensor(image.astype(np.float32)).unsqueeze(0)
+        image = F.interpolate(torch.tensor(image), size=(standard_shape), mode='trilinear', align_corners=False).squeeze(0)
+        if self.train:
+            mask = torch.tensor(mask.astype(np.float32)).unsqueeze(0)
+            mask = F.interpolate(torch.tensor(mask), size=(standard_shape), mode='trilinear', align_corners=False).squeeze(0)
+        sample = {'image': image, 'label': mask}
+        if self.transforms:
+            sample = self.transforms(sample)
+        if self.train:
+            label = sample['label'].as_tensor()
+        else:
+            label = torch.tensor(sample['label'].astype(np.float32))
+            image = sample['image']
+        return image, label
+
 def main():
+    data_dir = 'data/RIDER/'
     save_dir = 'weights/'
-    root_dir = 'data/MONAI/'
-    weight_dir = 'weights/'
-    print(root_dir)
-    resource = "https://msd-for-monai.s3-us-west-2.amazonaws.com/Task09_Spleen.tar"
-    md5 = "410d4a301da4e5b2f6f86ec3ddba524e"
-
-    compressed_file = os.path.join(root_dir, "Task09_Spleen.tar")
-    data_dir = os.path.join(root_dir, "Task09_Spleen")
-    if not os.path.exists(data_dir):
-        download_and_extract(resource, compressed_file, root_dir, md5)
-
-    train_images = sorted(glob.glob(os.path.join(data_dir, "imagesTr", "*.nii.gz")))
-    train_labels = sorted(glob.glob(os.path.join(data_dir, "labelsTr", "*.nii.gz")))
-    data_dicts = [{"image": image_name, "label": label_name} for image_name, label_name in zip(train_images, train_labels)]
-    train_files, val_files = data_dicts[:-9], data_dicts[-9:]
     set_determinism(seed=0)
-
-    train_transforms = Compose(
+        
+    train_transform = Compose(
         [
-            LoadImaged(keys=["image", "label"]),
-            EnsureChannelFirstd(keys=["image", "label"]),
-            ScaleIntensityRanged(
-                keys=["image"],
-                a_min=-57,
-                a_max=164,
-                b_min=0.0,
-                b_max=1.0,
-                clip=True,
-            ),
-            CropForegroundd(keys=["image", "label"], source_key="image"),
             Orientationd(keys=["image", "label"], axcodes="RAS"),
-            Spacingd(keys=["image", "label"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear", "nearest")),
+            RandSpatialCropd(keys=["image", "label"], roi_size=[256, 256, 128], random_size=False),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
+            NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
+            RandScaleIntensityd(keys="image", factors=0.1, prob=1.0),
+            RandShiftIntensityd(keys="image", offsets=0.1, prob=1.0),
         ]
     )
-    val_transforms = Compose(
+    test_transform = Compose(
         [
-            LoadImaged(keys=["image", "label"]),
-            EnsureChannelFirstd(keys=["image", "label"]),
-            ScaleIntensityRanged(
-                keys=["image"],
-                a_min=-57,
-                a_max=164,
-                b_min=0.0,
-                b_max=1.0,
-                clip=True,
-            ),
-            CropForegroundd(keys=["image", "label"], source_key="image"),
-            Orientationd(keys=["image", "label"], axcodes="RAS"),
-            Spacingd(keys=["image", "label"], pixdim=(1.5, 1.5, 2.0), mode=("bilinear", "nearest")),
+            NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
         ]
     )
 
-    check_ds = Dataset(data=val_files, transform=val_transforms)
-    check_loader = DataLoader(check_ds, batch_size=1)
-    check_data = first(check_loader)
-    train_ds = CacheDataset(data=train_files, transform=train_transforms, cache_rate=1.0, num_workers=4)
-    train_loader = DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=4)
-    val_ds = CacheDataset(data=val_files, transform=val_transforms, cache_rate=1.0, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=1, num_workers=4)
+    images_path = os.path.join(data_dir, 'images')
+    images_st_path = os.path.join(data_dir, 'images_std')
+    masks_path = os.path.join(data_dir, 'masks')
+    masks_st_path = os.path.join(data_dir, 'masks_std')
+    image_paths = os.listdir(images_path)
+    image_st_paths = sorted([os.path.join(images_st_path, image_path) for image_path in image_paths])
+    mask_paths = sorted([os.path.join(masks_path, image_path) for image_path in image_paths])
+    image_paths = sorted([os.path.join(images_path, image_path) for image_path in image_paths])
 
+    train_indices, test_indices = train_test_split(range(len(image_paths)), test_size=0.2)
+    train_image_paths = [image_st_paths[i] for i in train_indices]
+    test_image_paths = [image_st_paths[i] for i in test_indices]
+    train_mask_paths = [mask_paths[i] for i in train_indices]
+    test_mask_paths = [mask_paths[i] for i in test_indices]
+
+    train_ds = DatasetMRI(train_image_paths, train_mask_paths, train_transform, train=True)
+    test_ds = DatasetMRI(test_image_paths, test_mask_paths, test_transform, train=False)
+    train_loader = DataLoader(train_ds, batch_size=1, shuffle=True)
+    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
+
+    max_epochs = 300
     device = torch.device("cuda:2")
     model = UNet(
         spatial_dims=3,
-        in_channels=1,
+        in_channels=4,
         out_channels=1,
         channels=(16, 32, 64, 128, 256),
         strides=(2, 2, 2, 2),
@@ -143,7 +124,6 @@ def main():
         norm=Norm.BATCH,
     ).to(device)
 
-    max_epochs = 600
     loss_function = DiceLoss(smooth_nr=0, smooth_dr=1e-5, squared_pred=True, to_onehot_y=False, sigmoid=True)
     optimizer = torch.optim.AdamW(model.parameters(), 1e-4, weight_decay=1e-5)
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
@@ -151,15 +131,11 @@ def main():
     scaler = torch.cuda.amp.GradScaler()
     torch.backends.cudnn.benchmark = True
     dice_metric = DiceMetric(include_background=True, reduction="mean")
+    dice_metric_batch = DiceMetric(include_background=True, reduction="mean_batch")
     iou_metric = MeanIoU(include_background=True, reduction="mean")
+    iou_metric_batch = MeanIoU(include_background=True, reduction="mean_batch")
     tpf_metric = ConfusionMatrixMetric(metric_name="sensitivity", reduction="mean")
-    post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
-    post_label = Compose([AsDiscrete(threshold=0.5)])
-
-    val_interval = 2
-    best_metric, best_metric2, best_metric3 = -1, -1, -1
-    best_metric_epoch = -1
-    epoch_loss_values = []
+    tpf_metric_batch = ConfusionMatrixMetric(metric_name="sensitivity", reduction="mean_batch")
     post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
     post_label = Compose([AsDiscrete(threshold=0.5)])
 
@@ -170,16 +146,10 @@ def main():
     for epoch in tqdm(range(max_epochs)):
         model.train()
         epoch_loss, step = 0, 0
-        for batch_data in train_loader:
+        for image, label in train_loader:
             step += 1
-            input, label = (
-                batch_data["image"].to(device),
-                batch_data["label"].to(device),
-            )
             optimizer.zero_grad()
-            input = F.interpolate(input, size=(standard_shape), mode='trilinear', align_corners=False)
-            label = F.interpolate(label, size=(standard_shape), mode='trilinear', align_corners=False)
-            output = model(input)
+            output = model(image.to(device))  # (C, H, W, B)
             loss = loss_function(output, label.to(device))
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -192,16 +162,11 @@ def main():
         # TEST
         model.eval()
         with torch.no_grad():
-            for val_data in val_loader:
-                input, label = (
-                    val_data["image"].to(device),
-                    val_data["label"].to(device),
-                )
-                input = F.interpolate(input, size=(standard_shape), mode='trilinear', align_corners=False)
-                output = model(input)
+            for image, label in test_loader:
+                output = model(image.to(device))
                 output = F.interpolate(output, size=(list(label.shape)[2:]), mode='trilinear', align_corners=False).cpu()
-                output = post_trans(output).cpu()
-                label = post_label(label).cpu()
+                output = post_trans(output)
+                label = post_label(label)
                 dice_metric(y_pred=output, y=label)
                 iou_metric(y_pred=output, y=label)
                 tpf_metric(y_pred=output, y=label)
@@ -217,7 +182,7 @@ def main():
                 best_metric3 = metric3
                 torch.save(
                     model.state_dict(),
-                    os.path.join(save_dir, "UNet_ISPY1_spleen.pth"),
+                    os.path.join(save_dir, "UNet3D_RIDER.pth"),
                 )
                 print("saved new best metric model")
                 print(
@@ -228,8 +193,11 @@ def main():
                 )
                 
             dice_metric.reset()
+            dice_metric_batch.reset()
             iou_metric.reset()
+            iou_metric_batch.reset()
             tpf_metric.reset()
+            tpf_metric_batch.reset()
             wandb.log({"epoch": epoch, "average_train_loss": epoch_loss,
                 "val_dice": metric})
 

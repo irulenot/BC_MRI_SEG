@@ -11,6 +11,7 @@ from monai.metrics import DiceMetric, MeanIoU, ConfusionMatrixMetric
 from monai.networks.nets import UNet
 from monai.networks.layers import Norm
 from tqdm import tqdm
+from monai.networks.nets import SegResNet
 from monai.utils import set_determinism
 from monai.transforms import (
     Activations,
@@ -31,14 +32,17 @@ from monai.transforms import (
     EnsureTyped,
     EnsureChannelFirstd,
 )
+from monai.networks.nets import SwinUNETR
 import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import Dataset
 import numpy as np
 import wandb
+wandb.init(project="ichi2024", name="SwinUNETR")
 
-standard_shape = (256, 256, 128)
+
+standard_shape = (128, 128, 64)
 class DatasetMRI(Dataset):
     def __init__(self, data_paths, label_paths, transforms=None, train=True):
         self.data_paths = data_paths
@@ -87,7 +91,7 @@ def main():
     train_transform = Compose(
         [
             Orientationd(keys=["image", "label"], axcodes="RAS"),
-            RandSpatialCropd(keys=["image", "label"], roi_size=[256, 256, 128], random_size=False),
+            RandSpatialCropd(keys=["image", "label"], roi_size=[128, 128, 64], random_size=False),
             RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
             RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
             RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
@@ -134,29 +138,25 @@ def main():
     test_ds = DatasetMRI(all_test_image_paths, all_test_mask_paths, test_transform, train=False)
     test_ds0 = DatasetMRI(individual_test_image_paths[0], individual_test_mask_paths[0], test_transform, train=False)
     test_ds1 = DatasetMRI(individual_test_image_paths[1], individual_test_mask_paths[1], test_transform, train=False)
-    # test_ds2 = DatasetMRI(individual_test_image_paths[2], individual_test_mask_paths[2], test_transform, train=False)
     train_loader = DataLoader(train_ds, batch_size=1, shuffle=True)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     test_loader0 = DataLoader(test_ds0, batch_size=1, shuffle=False)
     test_loader1 = DataLoader(test_ds1, batch_size=1, shuffle=False) 
-    # test_loader2 = DataLoader(test_ds2, batch_size=1, shuffle=False) 
     individual_test_loaders = [test_loader0, test_loader1]
     individual_names = ['ISPY1', 'BreastDM']
 
     max_epochs = 300
     device = torch.device("cuda:2")
-    model = UNet(
-        spatial_dims=3,
+    model = SwinUNETR(
+        img_size=standard_shape,
         in_channels=3,
         out_channels=3,
-        channels=(16, 32, 64, 128, 256),
-        strides=(2, 2, 2, 2),
-        num_res_units=2,
-        norm=Norm.BATCH,
+        feature_size=48,
+        drop_rate=0.0,
+        attn_drop_rate=0.0,
+        dropout_path_rate=0.0,
+        use_checkpoint=True,
     ).to(device)
-    checkpoint_path = 'weights/UNet_CombinedP.pth'
-    checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint)
 
     def count_learnable_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -179,64 +179,109 @@ def main():
     tpf_metric_batch = ConfusionMatrixMetric(metric_name="sensitivity", reduction="mean_batch")
     post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
 
-    # TEST
-    # print('50')
-    model.eval()
-    with torch.no_grad():
-        for image, label in test_loader:
-            output = torch.zeros(label.shape)
-            if torch.rand(1) < 0.5:
-                output = torch.randint(0, 2, size=label.shape, dtype=torch.float32)            
-            dice_metric(y_pred=output, y=label)
-            iou_metric(y_pred=output, y=label)
-            tpf_metric(y_pred=output, y=label)
-        metric = dice_metric.aggregate().item()
-        avg_dice = metric
+    # TRAIN
+    best_metric, best_metric2, best_metric3 = -1, -1, -1
+    best_metric_epoch = -1
+    total_start = time.time()
+    for epoch in tqdm(range(max_epochs)):
+        model.train()
+        epoch_loss, step = 0, 0
+        for image, label in train_loader:
+            step += 1
+            optimizer.zero_grad()
+            output = model(image.to(device))  # (C, H, W, B)
+            loss = loss_function(output, label.to(device))
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            epoch_loss += loss.item()
+        lr_scheduler.step()
+        epoch_loss /= step
+        print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
 
-        best_metric = metric
-        metric2 = iou_metric.aggregate().item()
-        metric3 = tpf_metric.aggregate()[0].item()
-        best_metric2 = metric2
-        best_metric3 = metric3
-        print(
-            f"best mean dice: {best_metric:.4f}"
-            f"\nbest mean iou: {best_metric2:.4f}"
-            f"\nbest mean tpf: {best_metric3:.4f}"
-        )
-        
-        for i, individual_test_loader in enumerate(individual_test_loaders):
+        # TEST
+        model.eval()
+        with torch.no_grad():
+            for image, label in test_loader:
+                output = model(image.to(device))
+                output = F.interpolate(output, size=(list(label.shape)[2:]), mode='trilinear', align_corners=False).cpu()
+                output = post_trans(output)
+                dice_metric(y_pred=output, y=label)
+                iou_metric(y_pred=output, y=label)
+                tpf_metric(y_pred=output, y=label)
+            metric = dice_metric.aggregate().item()
+            avg_dice = metric
+            print(f"current epoch: {epoch + 1} current mean dice: {metric:.4f}")
+
+            if metric > best_metric:
+                best_metric = metric
+                best_metric_epoch = epoch + 1
+                metric2 = iou_metric.aggregate().item()
+                metric3 = tpf_metric.aggregate()[0].item()
+                best_metric2 = metric2
+                best_metric3 = metric3
+                torch.save(
+                    model.state_dict(),
+                    os.path.join(save_dir, "SwinUNETR.pth"),
+                )
+                print(f"saved new best metric model at epoch: {best_metric_epoch}")
+                print(
+                    f"best mean dice: {best_metric:.4f}"
+                    f"\nbest mean iou: {best_metric2:.4f}"
+                    f"\nbest mean tpf: {best_metric3:.4f}"
+                )
+                
+                for i, individual_test_loader in enumerate(individual_test_loaders):
+                    dice_metric.reset()
+                    dice_metric_batch.reset()
+                    iou_metric.reset()
+                    iou_metric_batch.reset()
+                    tpf_metric.reset()
+                    tpf_metric_batch.reset()
+
+                    dataset = individual_names[i]
+                    for image, label in individual_test_loader:
+                        output = model(image.to(device))
+                        output = F.interpolate(output, size=(list(label.shape)[2:]), mode='trilinear', align_corners=False).cpu()
+                        output = post_trans(output)
+                        dice_metric(y_pred=output, y=label)
+                        iou_metric(y_pred=output, y=label)
+                        tpf_metric(y_pred=output, y=label)
+
+                    metric = dice_metric.aggregate().item()
+                    metric2 = iou_metric.aggregate().item()
+                    metric3 = tpf_metric.aggregate()[0].item()
+                    print(
+                        f"{dataset}"
+                        f"\nmean dice: {metric:.4f}"
+                        f"\nmean iou: {metric2:.4f}"
+                        f"\nmean tpf: {metric3:.4f}"
+                    )
+                
             dice_metric.reset()
             dice_metric_batch.reset()
             iou_metric.reset()
             iou_metric_batch.reset()
             tpf_metric.reset()
             tpf_metric_batch.reset()
+            wandb.log({"epoch": epoch, "average_train_loss": epoch_loss,
+                "val_dice": avg_dice})
 
-            dataset = individual_names[i]
-            for image, label in individual_test_loader:
-                output = torch.zeros(label.shape)
-                if torch.rand(1) < 0.5:
-                    output = torch.randint(0, 2, size=label.shape, dtype=torch.float32)                
-                dice_metric(y_pred=output, y=label)
-                iou_metric(y_pred=output, y=label)
-                tpf_metric(y_pred=output, y=label)
+    # FINAL RESULTS
+    total_time = time.time() - total_start
+    print(f"train completed, best_metric: {best_metric:.4f} at epoch: {best_metric_epoch}, total time: {total_time}.")
+    print(
+        f"best mean dice: {best_metric:.4f}"
+        f"\nbest mean iou: {best_metric2:.4f}"
+        f"\nbest mean tpf: {best_metric3:.4f}"
+        f"\n at epoch: {best_metric_epoch}"
+    )
 
-            metric = dice_metric.aggregate().item()
-            metric2 = iou_metric.aggregate().item()
-            metric3 = tpf_metric.aggregate()[0].item()
-            print(
-                f"{dataset}"
-                f"\nmean dice: {metric:.4f}"
-                f"\nmean iou: {metric2:.4f}"
-                f"\nmean tpf: {metric3:.4f}"
-            )
-        
-    dice_metric.reset()
-    dice_metric_batch.reset()
-    iou_metric.reset()
-    iou_metric_batch.reset()
-    tpf_metric.reset()
-    tpf_metric_batch.reset()
+    print('learnable_parameters', count_learnable_parameters(model))
+    print('all_parameters', count_all_parameters(model))
+    wandb.log({"total_time": total_time,
+               'all_parameters': count_all_parameters(model),
+               'learnable_parameters': count_learnable_parameters(model)})
 
 if __name__ == "__main__":
     main()

@@ -37,7 +37,7 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 import wandb
-wandb.init(project="ichi2024", name="UNet_ISPY1")
+wandb.init(project="ichi2024", name="UNet3D_BreastDM")
 
 
 standard_shape = (256, 256, 128)
@@ -54,6 +54,7 @@ class DatasetMRI(Dataset):
     def __getitem__(self, idx):
         image = np.load(self.data_paths[idx]).transpose(1, 2, 3, 0)
         mask = np.load(self.label_paths[idx]).transpose(1, 2, 3, 0)
+        mask[mask > 0] = 1
         image = torch.tensor(image.astype(np.float32)).unsqueeze(0)
         image = F.interpolate(torch.tensor(image), size=(standard_shape), mode='trilinear', align_corners=False).squeeze(0)
         if self.train:
@@ -71,7 +72,7 @@ class DatasetMRI(Dataset):
 
 
 def main():
-    data_dir = 'data/ISPY1/'
+    data_dir = 'data/BreastDM/'
     save_dir = 'weights/'
     set_determinism(seed=0)
         
@@ -94,16 +95,14 @@ def main():
     )
 
     images_path = os.path.join(data_dir, 'images')
-    images_st_path = os.path.join(data_dir, 'images_std')
     masks_path = os.path.join(data_dir, 'masks')
     image_paths = os.listdir(images_path)
-    image_st_paths = [os.path.join(images_st_path, image_path) for image_path in image_paths]
-    mask_paths = [os.path.join(masks_path, image_path) for image_path in image_paths]
-    image_paths = [os.path.join(images_path, image_path) for image_path in image_paths]
+    mask_paths = sorted([os.path.join(masks_path, image_path) for image_path in image_paths])
+    image_paths = sorted([os.path.join(images_path, image_path) for image_path in image_paths])
 
     train_indices, test_indices = train_test_split(range(len(image_paths)), test_size=0.2)
-    train_image_paths = [image_st_paths[i] for i in train_indices]
-    test_image_paths = [image_st_paths[i] for i in test_indices]
+    train_image_paths = [image_paths[i] for i in train_indices]
+    test_image_paths = [image_paths[i] for i in test_indices]
     train_mask_paths = [mask_paths[i] for i in train_indices]
     test_mask_paths = [mask_paths[i] for i in test_indices]
 
@@ -113,11 +112,11 @@ def main():
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
 
     max_epochs = 300
-    device = torch.device("cuda:3")
+    device = torch.device("cuda:1")
     model = UNet(
         spatial_dims=3,
         in_channels=3,
-        out_channels=1,
+        out_channels=3,
         channels=(16, 32, 64, 128, 256),
         strides=(2, 2, 2, 2),
         num_res_units=2,
@@ -131,8 +130,11 @@ def main():
     scaler = torch.cuda.amp.GradScaler()
     torch.backends.cudnn.benchmark = True
     dice_metric = DiceMetric(include_background=True, reduction="mean")
+    dice_metric_batch = DiceMetric(include_background=True, reduction="mean_batch")
     iou_metric = MeanIoU(include_background=True, reduction="mean")
+    iou_metric_batch = MeanIoU(include_background=True, reduction="mean_batch")
     tpf_metric = ConfusionMatrixMetric(metric_name="sensitivity", reduction="mean")
+    tpf_metric_batch = ConfusionMatrixMetric(metric_name="sensitivity", reduction="mean_batch")
     post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
     post_label = Compose([AsDiscrete(threshold=0.5)])
 
@@ -146,7 +148,7 @@ def main():
         for image, label in train_loader:
             step += 1
             optimizer.zero_grad()
-            output = model(image.to(device))  # (B, C, H, W, D)
+            output = model(image.to(device))  # (C, H, W, B)
             loss = loss_function(output, label.to(device))
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -163,7 +165,6 @@ def main():
                 output = model(image.to(device))
                 output = F.interpolate(output, size=(list(label.shape)[2:]), mode='trilinear', align_corners=False).cpu()
                 output = post_trans(output)
-                label = post_label(label)
                 dice_metric(y_pred=output, y=label)
                 iou_metric(y_pred=output, y=label)
                 tpf_metric(y_pred=output, y=label)
@@ -179,7 +180,7 @@ def main():
                 best_metric3 = metric3
                 torch.save(
                     model.state_dict(),
-                    os.path.join(save_dir, "UNet_ISPY1.pth"),
+                    os.path.join(save_dir, "UNet3D_BreastDM.pth"),
                 )
                 print("saved new best metric model")
                 print(
@@ -190,8 +191,11 @@ def main():
                 )
                 
             dice_metric.reset()
+            dice_metric_batch.reset()
             iou_metric.reset()
+            iou_metric_batch.reset()
             tpf_metric.reset()
+            tpf_metric_batch.reset()
             wandb.log({"epoch": epoch, "average_train_loss": epoch_loss,
                 "val_dice": metric})
 
@@ -211,6 +215,7 @@ def main():
     def count_all_parameters(model):
         return sum(p.numel() for p in model.parameters())
     print('all_parameters', count_all_parameters(model))
+
     wandb.log({"total_time": total_time,
                'all_parameters': count_all_parameters(model),
                'learnable_parameters': count_learnable_parameters(model)})

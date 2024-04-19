@@ -37,9 +37,11 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 import wandb
+import sys
+sys.path.append(sys.path[0][:-9])
 from sama import sam_model_registry
 import sama.cfg as cfg
-wandb.init(project="ichi2024", name="SAM2D")
+wandb.init(project="ichi2024", name="SAM")
 
 
 standard_shape = (256, 256, 128)
@@ -148,17 +150,15 @@ def main():
     max_epochs = 300
     device = torch.device("cuda:3")
     args = cfg.parse_args()
+    args.thd = True
+    args.chunk = 32
     args.sam_ckpt = 'weights/vit_b.pth'
     model = sam_model_registry['vit_b'](args, checkpoint=args.sam_ckpt).to(device)
-    checkpoint_path = 'weights/SAM2D.pth'
-    checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint)
 
     for n, value in model.image_encoder.named_parameters():
         if "Adapter" not in n:
             value.requires_grad = False
-        if "Depth_Adapter" in n:
-            value.requires_grad = False
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
 
     def count_learnable_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -166,8 +166,6 @@ def main():
     def count_all_parameters(model):
         return sum(p.numel() for p in model.parameters())
     print('all_parameters', count_all_parameters(model))
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
 
     loss_function = DiceLoss(smooth_nr=0, smooth_dr=1e-5, squared_pred=True, to_onehot_y=False, sigmoid=True)
     optimizer = torch.optim.AdamW(model.parameters(), 1e-4, weight_decay=1e-5)
@@ -262,7 +260,7 @@ def main():
                 best_metric3 = metric3
                 torch.save(
                     model.state_dict(),
-                    os.path.join(save_dir, "SAM2D.pth"),
+                    os.path.join(save_dir, "Med-SA.pth"),
                 )
                 print(f"saved new best metric model at epoch: {best_metric_epoch}")
                 print(

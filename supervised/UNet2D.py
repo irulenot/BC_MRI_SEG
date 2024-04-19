@@ -37,7 +37,7 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 import wandb
-wandb.init(project="ichi2024", name="UNet_CombinedP")
+wandb.init(project="ichi2024", name="UNet2D")
 
 
 standard_shape = (256, 256, 128)
@@ -83,7 +83,7 @@ class DatasetMRI(Dataset):
         return image, label
 
 def main():
-    save_dir = 'weights/'
+    save_dir = '../weights/'
     set_determinism(seed=0)
         
     train_transform = Compose(
@@ -136,19 +136,17 @@ def main():
     test_ds = DatasetMRI(all_test_image_paths, all_test_mask_paths, test_transform, train=False)
     test_ds0 = DatasetMRI(individual_test_image_paths[0], individual_test_mask_paths[0], test_transform, train=False)
     test_ds1 = DatasetMRI(individual_test_image_paths[1], individual_test_mask_paths[1], test_transform, train=False)
-    # test_ds2 = DatasetMRI(individual_test_image_paths[2], individual_test_mask_paths[2], test_transform, train=False)
     train_loader = DataLoader(train_ds, batch_size=1, shuffle=True)
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
     test_loader0 = DataLoader(test_ds0, batch_size=1, shuffle=False)
     test_loader1 = DataLoader(test_ds1, batch_size=1, shuffle=False) 
-    # test_loader2 = DataLoader(test_ds2, batch_size=1, shuffle=False) 
     individual_test_loaders = [test_loader0, test_loader1]
     individual_names = ['ISPY1', 'BreastDM']
 
     max_epochs = 300
-    device = torch.device("cuda:2")
+    device = torch.device("cuda:1")
     model = UNet(
-        spatial_dims=3,
+        spatial_dims=2,
         in_channels=3,
         out_channels=3,
         channels=(16, 32, 64, 128, 256),
@@ -156,9 +154,6 @@ def main():
         num_res_units=2,
         norm=Norm.BATCH,
     ).to(device)
-    checkpoint_path = 'weights/UNet_CombinedP.pth'
-    checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint)
 
     def count_learnable_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -191,7 +186,9 @@ def main():
         for image, label in train_loader:
             step += 1
             optimizer.zero_grad()
-            output = model(image.to(device))  # (B, C, H, W, D)
+            image = image.squeeze().permute(-1, 0, 1, 2)
+            output = model(image.to(device))  # (B, C, H, W)
+            output = output.permute(1, 2, 3, 0).unsqueeze(0)
             loss = loss_function(output, label.to(device))
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -205,7 +202,9 @@ def main():
         model.eval()
         with torch.no_grad():
             for image, label in test_loader:
+                image = image.squeeze().permute(-1, 0, 1, 2)
                 output = model(image.to(device))
+                output = output.permute(1, 2, 3, 0).unsqueeze(0)
                 output = F.interpolate(output, size=(list(label.shape)[2:]), mode='trilinear', align_corners=False).cpu()
                 output = post_trans(output)
                 dice_metric(y_pred=output, y=label)
@@ -224,7 +223,7 @@ def main():
                 best_metric3 = metric3
                 torch.save(
                     model.state_dict(),
-                    os.path.join(save_dir, "UNet_CombinedP1.pth"),
+                    os.path.join(save_dir, "UNet2D.pth"),
                 )
                 print(f"saved new best metric model at epoch: {best_metric_epoch}")
                 print(
@@ -243,7 +242,9 @@ def main():
 
                     dataset = individual_names[i]
                     for image, label in individual_test_loader:
+                        image = image.squeeze().permute(-1, 0, 1, 2)
                         output = model(image.to(device))
+                        output = output.permute(1, 2, 3, 0).unsqueeze(0)
                         output = F.interpolate(output, size=(list(label.shape)[2:]), mode='trilinear', align_corners=False).cpu()
                         output = post_trans(output)
                         dice_metric(y_pred=output, y=label)
@@ -279,7 +280,11 @@ def main():
         f"\n at epoch: {best_metric_epoch}"
     )
 
+    def count_learnable_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('learnable_parameters', count_learnable_parameters(model))
+    def count_all_parameters(model):
+        return sum(p.numel() for p in model.parameters())
     print('all_parameters', count_all_parameters(model))
     wandb.log({"total_time": total_time,
                'all_parameters': count_all_parameters(model),
