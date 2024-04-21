@@ -3,7 +3,7 @@
 ## A Breast Cancer MRI Tumor Segmentation Benchmark
 
 ### Summary
-Binary breast cancer tumor segmentation with Magnetic Resonance Imaging (MRI) data is typically trained and evaluated on private medical data, which makes comparing deep learning approaches difficult. We propose a benchmark (BC-MRI-SEG) for binary breast cancer tumor segmentation based on publicly available (MRI) datasets. The benchmark consists of four datasets in total, where two datasets are used for supervised training and evaluation, and two are used for zero-shot evaluation.
+Binary breast cancer tumor segmentation with Magnetic Resonance Imaging (MRI) data is typically trained and evaluated on private medical data, which makes comparing deep learning approaches difficult. We propose a benchmark (BC-MRI-SEG) for binary breast cancer tumor segmentation based on publicly available MRI datasets. The benchmark consists of four datasets in total, where two datasets are used for supervised training and evaluation, and two are used for zero-shot evaluation.
 
 ### Benchmark Instructions
 1. **Follow the steps in Setup.**
